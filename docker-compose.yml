@@ -1,0 +1,21 @@
+services:
+  autodrive:
+    build:
+      context: .
+    container_name: autodrive_rl
+    volumes:
+      # 호스트 작업 폴더 ↔ 컨테이너 /autodrive 동기화
+      - .:/autodrive
+    environment:
+      - CYCLONEDDS_URI=/autodrive/cyclonedds_config.xml
+    # 호스트 네트워크 사용 (호스트의 Unity 시뮬레이터와 Socket.IO 통신)
+    network_mode: host
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
