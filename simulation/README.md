@@ -1,5 +1,7 @@
 # Hunter SE Scenes
 
+<video src="Hunter_SE_LIDAR_TEST_OS1_128.webm" controls width="100%"></video>
+
 이 문서는 `AutoDRIVE-Simulator/Assets/Scenes` 아래의 Hunter SE 씬 구조를 빠르게 파악하기 위한 요약이다.
 
 대상 씬:
