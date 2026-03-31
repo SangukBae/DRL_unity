@@ -1,0 +1,29 @@
+env:
+  # WebSocket 서버 설정
+  host: "0.0.0.0"
+  port: 4567
+
+  # LiDAR 설정
+  lidar_dim: 360
+  lidar_max_range: 12.0
+
+  # Hunter SE 물리 한계
+  max_linear_vel: 1.5
+  max_angular_vel: 1.0
+
+  # 아레나 (RandomObstacleArenaBuilder.cs의 arenaSize와 일치)
+  arena_size: 30.0
+  goal_threshold: 0.5
+
+  # 에피소드 설정
+  max_episode_steps: 500
+  step_timeout: 5.0
+
+  # 충돌 감지 (test_collision.py 방식)
+  collision_debounce_sec: 1.0
+
+  # 보상 함수 상수
+  reward_target: 10.0
+  reward_collision: -1.0
+  reward_step: 0.01
+  reward_backward: -0.05
