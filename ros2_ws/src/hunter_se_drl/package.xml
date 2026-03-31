@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!--
+  package.xml
+
+  [역할]
+  ROS2 패키지 메타데이터 및 의존성 선언 파일.
+
+  [구현 내용]
+  - 패키지명: hunter_se_drl
+  - 빌드 타입: ament_cmake
+  - 의존성:
+      rclpy                  (ROS2 Python 클라이언트)
+      drl_agent_interfaces   (Step/Reset/GetDimensions 등 서비스 정의)
+      std_msgs               (기본 메시지 타입)
+  - Python 의존성 (exec_depend):
+      python3-socketio       (AutoDRIVE Socket.IO 통신)
+      python3-torch          (SAC/TQC 신경망)
+      python3-numpy
+-->

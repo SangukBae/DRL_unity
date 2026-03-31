@@ -1,0 +1,33 @@
+# environment.yaml
+#
+# [역할]
+# Hunter SE 환경의 모든 파라미터를 정의한다.
+# autodrive_env.py가 시작 시 이 파일을 로드하여 환경을 초기화한다.
+#
+# [구현 내용]
+# 아래 항목들을 실제 Hunter SE 및 AutoDRIVE 씬 설정에 맞게 값을 채워야 한다.
+#
+# environment:
+#   # 상태/액션 공간
+#   lidar_dim:          Hunter SE LIDAR의 빔 수 (해상도에 따라 결정)
+#   agent_state_dim:    로봇 상태 차원 [dist_to_goal, x, y, theta] = 4
+#   action_dim:         액션 차원 [linear_vel, angular_vel] = 2
+#
+#   # Hunter SE 물리 한계 (실제 로봇 스펙 참조)
+#   max_linear_vel:     최대 선형 속도 (m/s)
+#   max_angular_vel:    최대 각속도 (rad/s)
+#   actions_low:        액션 하한 [linear_vel_min, angular_vel_min]
+#   actions_high:       액션 상한 [linear_vel_max, angular_vel_max]
+#
+#   # 아레나 (RandomObstacleArenaBuilder.cs의 arenaSize와 일치시켜야 함)
+#   arena_size:         아레나 크기 (m)
+#   goal_threshold:     목표 도달 판정 거리 (m)
+#   collision_threshold: LiDAR 충돌 판정 임계값 (m)
+#   lidar_max_range:    LIDAR 최대 감지 거리 (m)
+#
+#   # AutoDRIVE Socket.IO 연결 정보
+#   socketio_host:      AutoDRIVE Unity가 실행 중인 호스트 IP
+#   socketio_port:      AutoDRIVE Socket.IO 포트 번호
+#
+#   # 에피소드 설정
+#   max_episode_steps:  에피소드당 최대 스텝 수

@@ -1,0 +1,22 @@
+# train_tqc_config.yaml
+#
+# [역할]
+# TQC 학습 루프 전체를 제어하는 설정.
+# train_sac_config.yaml과 동일한 구조이며, TQC에 맞는 값으로 설정한다.
+# train_tqc.py가 시작 시 로드한다.
+#
+# [구현 내용]
+# train_sac_config.yaml과 동일한 항목 구조.
+# TQC는 SAC 대비 더 보수적인 Q-value 추정으로 안정적이므로
+# timesteps_before_training을 더 낮게 설정할 수 있다.
+#
+# train:
+#   seed:
+#   max_timesteps:
+#   timesteps_before_training:
+#   eval_freq:
+#   eval_episodes:
+#   max_episode_steps:
+#   save_model:
+#   checkpoint_freq:
+#   model_save_dir:

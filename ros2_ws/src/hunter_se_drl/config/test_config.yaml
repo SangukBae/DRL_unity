@@ -1,0 +1,19 @@
+# test_config.yaml
+#
+# [역할]
+# 학습된 모델로 테스트를 실행할 때 사용하는 설정.
+# test.launch.py 실행 시 autodrive_env.py와 test 스크립트가 이 파일을 로드한다.
+#
+# [구현 내용]
+# test:
+#   seed:                         테스트 난수 시드
+#   num_test_episodes:            테스트 에피소드 수
+#   max_episode_steps:            에피소드당 최대 스텝 수
+#
+#   # 모델 로드
+#   algorithm:                    사용할 알고리즘 ("sac" 또는 "tqc")
+#   model_path:                   불러올 모델 파일 경로
+#
+#   # 결과 저장
+#   save_results:                 테스트 결과 저장 여부
+#   results_save_dir:             결과 저장 경로
