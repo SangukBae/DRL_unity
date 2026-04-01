@@ -19,23 +19,49 @@ SB3 알고리즘으로 Hunter SE를 학습시키는 학습 루프 모듈.
 ## 실행 방법
 
 ```bash
+cd /autodrive
+
 # SAC 학습
-python train/train_sac.py
+python hunter_se_drl/train/train_sac.py
 
 # PPO 학습
-python train/train_ppo.py
+python hunter_se_drl/train/train_ppo.py
 ```
 
 ## 학습 흐름
 
 ```
+_preflight_check()        ← 준비 상태 점검 (config·패키지·포트·ROS2)
+    ↓ FAIL이면 종료
 config 로드
     ↓
-HunterSEEnv 생성 (envs/hunter_se_env.py)
+HunterSEEnv 생성          ← eventlet 서버 + ROS2 퍼블리셔 초기화
     ↓
-SB3 모델 생성 (SAC 또는 PPO + HunterSEPolicy)
+_launch_rviz()            ← RViz2 백그라운드 자동 실행
+    ↓
+SB3 모델 생성 (SAC 또는 PPO)
     ↓
 model.learn(total_timesteps=...)
-    ↓                    ← SB3가 내부적으로 reset() / step() 반복 호출
-모델 저장
+    ↓                     ← SB3가 내부적으로 reset() / step() 반복 호출
+모델 저장 (checkpoints/ + models/)
+    ↓
+env.close() + RViz2 종료
 ```
+
+## 준비 상태 점검 항목
+
+학습 파일 실행 시 가장 먼저 출력된다.
+
+| 상태 | 의미 |
+|------|------|
+| `[OK]` | 정상 |
+| `[WARN]` | 없어도 학습 가능 (RViz2 관련) |
+| `[FAIL]` | 반드시 해결 필요 — 자동으로 종료됨 |
+
+점검 항목:
+- config yaml 파일 존재 여부
+- PyTorch, SB3, Gymnasium, eventlet, numpy import
+- CUDA 사용 가능 여부
+- rclpy import (RViz2 시각화)
+- RViz2 setup.bash / .rviz config 파일 존재
+- 포트 4567 점유 여부
