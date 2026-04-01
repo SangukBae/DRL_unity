@@ -6,8 +6,11 @@ services:
     volumes:
       # 호스트 작업 폴더 ↔ 컨테이너 /autodrive 동기화
       - .:/autodrive
+      # X11 소켓 마운트 (GUI 앱 실행용)
+      - /tmp/.X11-unix:/tmp/.X11-unix
     environment:
       - CYCLONEDDS_URI=/autodrive/cyclonedds_config.xml
+      - DISPLAY=${DISPLAY}
     # 호스트 네트워크 사용 (호스트의 Unity 시뮬레이터와 Socket.IO 통신)
     network_mode: host
     stdin_open: true

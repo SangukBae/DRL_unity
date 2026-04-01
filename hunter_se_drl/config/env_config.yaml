@@ -21,9 +21,3 @@ env:
 
   # 충돌 감지 (test_collision.py 방식)
   collision_debounce_sec: 1.0
-
-  # 보상 함수 상수
-  reward_target: 10.0
-  reward_collision: -1.0
-  reward_step: 0.01
-  reward_backward: -0.05

@@ -7,6 +7,7 @@ SB3 PPO로 Hunter SE 장애물 회피 + 목표 도달 학습.
     python train/train_ppo.py
 """
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -18,10 +19,119 @@ from envs.hunter_se_env import HunterSEEnv
 from models.custom_policy import PPO_POLICY_KWARGS
 from utils.file_manager import ensure_dir, load_yaml
 
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
+CONFIG_DIR  = os.path.join(os.path.dirname(__file__), "..", "config")
+RVIZ_CONFIG = "/autodrive/AutoDRIVE-Devkit/ADSS Toolkit/autodrive_ros2/autodrive_hunter_se/rviz/simulator.rviz"
+RVIZ_SETUP  = "/autodrive/AutoDRIVE-Devkit/ADSS Toolkit/autodrive_ros2/install/setup.bash"
+
+
+def _preflight_check() -> bool:
+    """학습 시작 전 필수 항목을 점검하고 결과를 출력한다. FAIL 항목이 있으면 False 반환."""
+    import importlib
+    import socket as _socket
+
+    print("=" * 60)
+    print("  학습 준비 상태 점검")
+    print("=" * 60)
+
+    fail = False
+
+    # 1. Config 파일
+    for name in ("env_config", "train_ppo_config"):
+        path = os.path.join(CONFIG_DIR, f"{name}.yaml")
+        if os.path.isfile(path):
+            print(f"  [OK]   config/{name}.yaml")
+        else:
+            print(f"  [FAIL] config/{name}.yaml 없음  →  {path}")
+            fail = True
+
+    # 2. Python 패키지
+    for pkg, label in [
+        ("torch",             "PyTorch"),
+        ("stable_baselines3", "Stable-Baselines3"),
+        ("gymnasium",         "Gymnasium"),
+        ("eventlet",          "eventlet"),
+        ("numpy",             "numpy"),
+    ]:
+        try:
+            mod = importlib.import_module(pkg)
+            ver = getattr(mod, "__version__", "?")
+            print(f"  [OK]   {label} {ver}")
+        except ImportError:
+            print(f"  [FAIL] {label} import 실패  →  pip install {pkg}")
+            fail = True
+
+    # CUDA
+    try:
+        import torch
+        if torch.cuda.is_available():
+            print(f"  [OK]   CUDA  ({torch.cuda.get_device_name(0)})")
+        else:
+            print(f"  [WARN] CUDA 없음  →  CPU 학습 (느릴 수 있음)")
+    except Exception:
+        pass
+
+    # 3. ROS2 / RViz2
+    try:
+        importlib.import_module("rclpy")
+        print("  [OK]   rclpy  (RViz2 시각화 활성화)")
+    except ImportError:
+        print("  [WARN] rclpy 없음  →  RViz2 시각화 비활성화 (학습은 정상)")
+
+    for label, path in [
+        ("RViz setup.bash", RVIZ_SETUP),
+        ("RViz .rviz config", RVIZ_CONFIG),
+    ]:
+        if os.path.isfile(path):
+            print(f"  [OK]   {label}")
+        else:
+            print(f"  [WARN] {label} 없음  →  RViz2 자동 실행 불가")
+
+    # 4. 포트 4567 점유 여부
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", 4567)) == 0:
+                print("  [FAIL] 포트 4567 이미 사용 중  →  다른 프로세스를 종료하세요")
+                fail = True
+            else:
+                print("  [OK]   포트 4567 사용 가능")
+    except Exception:
+        print("  [OK]   포트 4567 사용 가능")
+
+    print("-" * 60)
+    if fail:
+        print("  [FAIL] 항목을 해결한 후 다시 실행하세요.")
+    else:
+        print("  모든 필수 항목 통과.  Unity Play 후 학습이 시작됩니다.")
+    print("=" * 60)
+    print()
+    return not fail
+
+
+def _launch_rviz():
+    """RViz2를 백그라운드로 실행한다. 실패해도 학습을 중단하지 않는다."""
+    cmd = (
+        f"source /opt/ros/humble/setup.bash && "
+        f"source '{RVIZ_SETUP}' && "
+        f"ros2 run rviz2 rviz2 -d '{RVIZ_CONFIG}'"
+    )
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"[RViz2] 시작됨 (PID {proc.pid})")
+        return proc
+    except Exception as e:
+        print(f"[RViz2] 실행 실패 (학습은 계속됩니다): {e}")
+        return None
 
 
 def main():
+    if not _preflight_check():
+        sys.exit(1)
+
     # 1. config 로드
     cfg = load_yaml(os.path.join(CONFIG_DIR, "train_ppo_config.yaml"))["train"]
 
@@ -43,8 +153,9 @@ def main():
     ensure_dir(model_save_dir)
     ensure_dir(log_dir)
 
-    # 2. 환경 생성
+    # 2. 환경 생성 + RViz2 자동 실행
     env = HunterSEEnv(config_path=os.path.join(CONFIG_DIR, "env_config.yaml"))
+    rviz_proc = _launch_rviz()
 
     # 3. 모델 생성
     model = PPO(
@@ -73,18 +184,22 @@ def main():
     )
 
     # 5. 학습
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=checkpoint_cb,
-        reset_num_timesteps=True,
-    )
+    try:
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=checkpoint_cb,
+            reset_num_timesteps=True,
+        )
 
-    # 6. 최종 모델 저장
-    final_path = os.path.join(model_save_dir, "final_model")
-    model.save(final_path)
-    print(f"\n학습 완료. 최종 모델 저장: {final_path}")
-
-    env.close()
+        # 6. 최종 모델 저장
+        final_path = os.path.join(model_save_dir, "final_model")
+        model.save(final_path)
+        print(f"\n학습 완료. 최종 모델 저장: {final_path}")
+    finally:
+        env.close()
+        if rviz_proc is not None:
+            rviz_proc.terminate()
+            print("[RViz2] 종료됨")
 
 
 if __name__ == "__main__":

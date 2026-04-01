@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     git unzip zip \
     software-properties-common \
     iproute2 iputils-ping net-tools \
+    gedit tree \
     # Python 3.10 (SB3 및 ROS2 Humble 공통)
     python3 python3-pip python3-venv python3-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -69,7 +70,9 @@ RUN /opt/venv/rl/bin/pip install --upgrade pip && \
     /opt/venv/rl/bin/pip install -e '/tmp/stable-baselines3[extra]' && \
     /opt/venv/rl/bin/pip install \
         "python-socketio[client]" \
-        eventlet
+        eventlet \
+        gevent \
+        gevent-websocket
 
 # 컨테이너 접속 시 RL 가상환경 자동 활성화
 RUN echo "source /opt/venv/rl/bin/activate" >> /root/.bashrc
