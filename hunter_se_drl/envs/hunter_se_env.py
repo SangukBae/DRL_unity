@@ -667,8 +667,9 @@ class HunterSEEnv(gym.Env):
         z_weights=(0.6, 0.85, 1.0, 0.85, 0.6),
         safety_margin=1.5, w_obs=0.8,
         d_safe_base=0.55, d_safe_speed=0.30,
-        k_h=0.3, step_pen=0.01,
+        k_h=0.3, step_pen=0.02,
         k_smooth=0.0, prev_v=None, prev_w=None,
+        k_forward=0.15,
     ) -> float:
         # 터미널
         if target:    return 10.0
@@ -682,11 +683,15 @@ class HunterSEEnv(gym.Env):
         delta_d  = np.clip(prev_goal_dist - curr_goal_dist, -progress_clip, progress_clip)
         progress = k_p * delta_d
 
-        # 2) 곡률 페널티 (원운동 억제)
+        # 2) 전진 보너스 / 후진 페널티
+        # v_n > 0이면 보너스, v_n < 0이면 페널티 (후진 억제)
+        forward = k_forward * v_n
+
+        # 3) 곡률 페널티 (원운동 억제)
         kappa    = abs(w_n) / (abs(v_n) + 1e-3)
         curv_pen = lambda_k * kappa
 
-        # 3) 장애물 근접 페널티
+        # 4) 장애물 근접 페널티
         obstacle = 0.0
         if zmins is not None and zthrs is not None and len(zmins) == 5 and len(zthrs) == 5:
             deficits = []
@@ -703,18 +708,18 @@ class HunterSEEnv(gym.Env):
                 if min_laser < d_safe:
                     obstacle = w_obs * (1.0 - min_laser / max(d_safe, 1e-6))
 
-        # 4) 헤딩 보너스
+        # 5) 헤딩 보너스
         heading = k_h * math.cos(theta_err) if theta_err is not None else 0.0
 
-        # 5) 스무딩 페널티 (선택)
+        # 6) 스무딩 페널티 (선택)
         smooth = 0.0
         if k_smooth > 0.0 and prev_v is not None and prev_w is not None:
             dv = abs(v - prev_v) / max(v_max, 1e-6)
             dw = abs(w - prev_w) / max(w_max, 1e-6)
             smooth = k_smooth * 0.5 * (dv + dw)
 
-        # 6) 시간 페널티 및 합산
-        reward = progress + heading - curv_pen - obstacle - step_pen - smooth
+        # 7) 합산: 시간 페널티(step_pen)로 빠른 경로 탐색 유도
+        reward = progress + heading + forward - curv_pen - obstacle - step_pen - smooth
         return float(np.clip(reward, -1.0, 1.0))
 
     def _parse_position(self):
