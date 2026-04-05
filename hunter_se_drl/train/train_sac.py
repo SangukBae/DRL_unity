@@ -88,17 +88,21 @@ def _preflight_check() -> bool:
         else:
             print(f"  [WARN] {label} 없음  →  RViz2 자동 실행 불가")
 
-    # 4. 포트 4567 점유 여부
+    # 4. 포트 점유 여부 (env_config.yaml에서 포트 읽기)
+    try:
+        _port = load_yaml(os.path.join(CONFIG_DIR, "env_config.yaml"))["env"]["port"]
+    except Exception:
+        _port = 4567
     try:
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.settimeout(0.3)
-            if s.connect_ex(("127.0.0.1", 4567)) == 0:
-                print("  [FAIL] 포트 4567 이미 사용 중  →  다른 프로세스를 종료하세요")
+            if s.connect_ex(("127.0.0.1", _port)) == 0:
+                print(f"  [FAIL] 포트 {_port} 이미 사용 중  →  다른 프로세스를 종료하세요")
                 fail = True
             else:
-                print("  [OK]   포트 4567 사용 가능")
+                print(f"  [OK]   포트 {_port} 사용 가능")
     except Exception:
-        print("  [OK]   포트 4567 사용 가능")
+        print(f"  [OK]   포트 {_port} 사용 가능")
 
     print("-" * 60)
     if fail:
@@ -174,8 +178,9 @@ def main():
     ent_coef         = cfg["ent_coef"]
     target_entropy   = cfg["target_entropy"]
     save_freq        = cfg["save_freq"]
-    model_save_dir   = cfg["model_save_dir"]
-    log_dir          = cfg["log_dir"]
+    _project_root    = os.path.normpath(os.path.join(CONFIG_DIR, ".."))
+    model_save_dir   = os.path.join(_project_root, cfg["model_save_dir"])
+    log_dir          = os.path.join(_project_root, cfg["log_dir"])
 
     ensure_dir(model_save_dir)
     ensure_dir(log_dir)

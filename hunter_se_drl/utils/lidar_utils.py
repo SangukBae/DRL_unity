@@ -28,6 +28,8 @@ def preprocess_lidar(
     ranges[~np.isfinite(ranges)] = max_range
 
     # target_dim으로 리샘플링
+    if len(ranges) == 0:
+        return np.ones(target_dim, dtype=np.float32)  # 빈 배열 → max_range로 채움
     if len(ranges) != target_dim:
         x_orig = np.linspace(0, 1, len(ranges))
         x_new = np.linspace(0, 1, target_dim)

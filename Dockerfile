@@ -73,7 +73,8 @@ RUN /opt/venv/rl/bin/pip install --upgrade pip && \
         eventlet \
         gevent \
         gevent-websocket \
-        pyyaml
+        pyyaml \
+        nvidia-ml-py
 
 # 컨테이너 접속 시 RL 가상환경 자동 활성화
 RUN echo "source /opt/venv/rl/bin/activate" >> /root/.bashrc

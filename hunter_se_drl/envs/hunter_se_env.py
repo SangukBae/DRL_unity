@@ -79,7 +79,7 @@ class HunterSEEnv(gym.Env):
     """
     AutoDRIVE Hunter SE 강화학습 환경.
 
-    관측 공간: LiDAR(lidar_dim) + [dist_to_goal, angle_to_goal] → shape=(lidar_dim+2,)
+    관측 공간: LiDAR(lidar_dim) + [dist_to_goal, angle_to_goal, theta_err] → shape=(lidar_dim+3,)
     행동 공간: [linear_vel, angular_vel] ∈ [-1, 1]  (실제 속도로 스케일링 후 전송)
 
     ROS2가 설치된 환경에서는 학습 중에도 RViz2로 센서 데이터를 시각화할 수 있다.
@@ -119,10 +119,11 @@ class HunterSEEnv(gym.Env):
         self.collision_debounce   = cfg["collision_debounce_sec"]
 
         # Gymnasium 공간 정의
-        obs_dim = self.lidar_dim + 2
-        self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
-        )
+        # LiDAR(lidar_dim) + dist_to_goal + angle_to_goal + theta_err
+        obs_dim = self.lidar_dim + 3
+        low  = np.concatenate([np.zeros(self.lidar_dim + 2, dtype=np.float32), [-1.0]])
+        high = np.concatenate([np.ones(self.lidar_dim + 2,  dtype=np.float32), [ 1.0]])
+        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         # action[0]: 스로틀 [-1, 1] — 전진(+) / 후진(-), 최대 속도 동일 (±4.8 km/h)
         # action[1]: 조향   [-1, 1] — 좌(-) / 우(+)
         self.action_space = gym.spaces.Box(
@@ -156,7 +157,8 @@ class HunterSEEnv(gym.Env):
         self._ctrl_log_file   = None
         self._ctrl_log_writer = None
         if cfg.get("control_log_enabled", False):
-            log_dir = cfg.get("control_log_dir", "logs/control")
+            _project_root = os.path.normpath(os.path.join(os.path.dirname(config_path), ".."))
+            log_dir = os.path.join(_project_root, cfg.get("control_log_dir", "logs/control"))
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(
                 log_dir,
@@ -223,7 +225,7 @@ class HunterSEEnv(gym.Env):
                 "[HunterSEEnv] reset timeout: Unity 텔레메트리를 받지 못했습니다. "
                 "Unity Play 상태와 Socket.IO 연결을 확인하세요."
             )
-            obs = np.zeros(self.lidar_dim + 2, dtype=np.float32)
+            obs = np.zeros(self.lidar_dim + 3, dtype=np.float32)
             return obs, {}
 
         # 스폰 직후 충돌 카운터 기준값 설정
@@ -280,7 +282,7 @@ class HunterSEEnv(gym.Env):
                     f"[HunterSEEnv] step timeout x{self._step_timeout_count}: "
                     "제어 명령에 대한 Unity 응답이 없습니다."
                 )
-            obs = np.zeros(self.lidar_dim + 2, dtype=np.float32)
+            obs = np.zeros(self.lidar_dim + 3, dtype=np.float32)
             return obs, 0.0, False, True, {"timeout": True}
 
         self._step_timeout_count = 0
@@ -294,7 +296,7 @@ class HunterSEEnv(gym.Env):
 
         obs  = self._get_observation()  # min_laser 갱신 포함
 
-        reward = self.get_reward(
+        reward, reward_components = self.get_reward(
             target=target_reached,
             collision=collision,
             v=linear_vel,
@@ -317,6 +319,7 @@ class HunterSEEnv(gym.Env):
             "target_reached": target_reached,
             "dist_to_goal":   dist,
             "step":           self._step_count,
+            **reward_components,
         }
         return obs, reward, terminated, truncated, info
 
@@ -605,9 +608,8 @@ class HunterSEEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         lidar_raw = self._telemetry.get("V1 LIDAR Range Array", "")
-        if lidar_raw:
-            ranges = decode_lidar(lidar_raw)
-        else:
+        ranges = decode_lidar(lidar_raw) if lidar_raw else np.array([], dtype=np.float32)
+        if len(ranges) == 0:
             ranges = np.full(self.lidar_dim, self.lidar_max_range, dtype=np.float32)
 
         # 보상 함수용 min_laser (정규화 전 원시 거리값)
@@ -619,9 +621,10 @@ class HunterSEEnv(gym.Env):
         dist       = self._dist_to_goal()
         angle      = self._angle_to_goal()
         dist_norm  = np.clip(dist / (self.arena_size * math.sqrt(2)), 0.0, 1.0)
-        angle_norm = (angle / math.pi + 1.0) / 2.0   # [-π, π] → [0, 1]
+        angle_norm = (angle / math.pi + 1.0) / 2.0         # [-π, π] → [0, 1]
+        theta_norm = self._theta_err() / math.pi            # [-π, π] → [-1, 1] (로봇 상대 헤딩)
 
-        return np.concatenate([lidar_norm, [dist_norm, angle_norm]]).astype(np.float32)
+        return np.concatenate([lidar_norm, [dist_norm, angle_norm, theta_norm]]).astype(np.float32)
 
     def _detect_collision(self) -> bool:
         now = time.monotonic()
@@ -669,11 +672,11 @@ class HunterSEEnv(gym.Env):
         d_safe_base=0.55, d_safe_speed=0.30,
         k_h=0.3, step_pen=0.02,
         k_smooth=0.0, prev_v=None, prev_w=None,
-        k_forward=0.15,
-    ) -> float:
+        k_forward=0.3,
+    ):
         # 터미널
-        if target:    return 10.0
-        if collision: return -10.0
+        if target:    return 10.0, {}
+        if collision: return -10.0, {}
 
         # 정규화
         v_n = v / max(v_max, 1e-6)
@@ -684,7 +687,6 @@ class HunterSEEnv(gym.Env):
         progress = k_p * delta_d
 
         # 2) 전진 보너스 / 후진 페널티
-        # v_n > 0이면 보너스, v_n < 0이면 페널티 (후진 억제)
         forward = k_forward * v_n
 
         # 3) 곡률 페널티 (원운동 억제)
@@ -718,9 +720,18 @@ class HunterSEEnv(gym.Env):
             dw = abs(w - prev_w) / max(w_max, 1e-6)
             smooth = k_smooth * 0.5 * (dv + dw)
 
-        # 7) 합산: 시간 페널티(step_pen)로 빠른 경로 탐색 유도
+        # 7) 합산
         reward = progress + heading + forward - curv_pen - obstacle - step_pen - smooth
-        return float(np.clip(reward, -1.0, 1.0))
+
+        components = {
+            "rwc_progress":  round(progress,  4),
+            "rwc_forward":   round(forward,   4),
+            "rwc_heading":   round(heading,   4),
+            "rwc_curv_pen":  round(curv_pen,  4),
+            "rwc_obstacle":  round(obstacle,  4),
+            "rwc_step_pen":  round(step_pen,  4),
+        }
+        return float(np.clip(reward, -1.0, 1.0)), components
 
     def _parse_position(self):
         """텔레메트리에서 로봇 위치(x, z)와 yaw를 파싱한다."""
@@ -729,7 +740,7 @@ class HunterSEEnv(gym.Env):
             try:
                 parts = [float(v) for v in pos_str.split()]
                 if len(parts) >= 3:
-                    self._robot_pos = (parts[0], parts[1])
+                    self._robot_pos = (parts[0], parts[2])  # Unity: x=right, z=forward (Y는 높이)
             except (ValueError, TypeError):
                 pass
 
