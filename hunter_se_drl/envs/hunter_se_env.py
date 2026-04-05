@@ -47,6 +47,12 @@ DEFAULT_CONTROL = {
     "V1 CoSim": "0",
     "V1 Linear Velocity": "0",
     "V1 Angular Velocity": "0",
+    "V1 Throttle": "0",
+    "V1 Steering": "0",
+    "V1 Brake": "0",
+    "V1 Handbrake": "0",
+    "V1 Headlights": "0",
+    "V1 Indicators": "0",
     "Goal PosX": "0",
     "Goal PosZ": "0",
 }
@@ -54,6 +60,19 @@ DEFAULT_CONTROL = {
 LIDAR_RANGE_MIN = 0.15   # m
 LIDAR_OFFSET    = [0.10, 0.0, 0.25]
 IMU_OFFSET      = [0.0,  0.0, 0.10]
+
+# ── Hunter SE 물리 상수 (데이터셋 + 공식 메뉴얼 기준) ───────────────────────
+# Throttle → 속도 비선형 매핑 (AutoDRIVE-Hunter-SE-Dataset/vehicle_parameters)
+_THROTTLE_PTS = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+_VELOCITY_PTS = np.array([0.000, 0.318, 0.626, 0.927, 1.223, 1.516,
+                           1.809, 2.109, 2.500, 3.016, 3.561])
+
+# 최소 회전 반경 (공식 메뉴얼: 1.9 m)
+R_MIN = 1.9  # m
+
+# 액션 변화율 제한 (데이터셋 프레임 간 delta std ~0.022/frame @30Hz → RL ~4Hz 환산)
+MAX_THROTTLE_DELTA = 0.25   # 정규화 단위 /step
+MAX_STEERING_DELTA = 0.20   # 정규화 단위 /step
 
 
 class HunterSEEnv(gym.Env):
@@ -104,15 +123,18 @@ class HunterSEEnv(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
+        # action[0]: 스로틀 [-1, 1] — 전진(+) / 후진(-), 최대 속도 동일 (±4.8 km/h)
+        # action[1]: 조향   [-1, 1] — 좌(-) / 우(+)
         self.action_space = gym.spaces.Box(
             low=np.array([-1.0, -1.0], dtype=np.float32),
-            high=np.array([1.0, 1.0], dtype=np.float32),
+            high=np.array([ 1.0,  1.0], dtype=np.float32),
         )
 
         # 내부 상태
         self._ws                = None          # 현재 WebSocket 연결
         self._telemetry         = {}            # 최신 텔레메트리
         self._telemetry_event   = threading.Event()
+        self._connected_event   = threading.Event()
         self._send_queue        = queue.Queue() # ws.send() 요청을 ws_handler에 전달
         self._prev_unity_count  = 0             # 이전 Unity 누적 충돌 카운터
         self._last_collision_at = 0.0
@@ -124,7 +146,28 @@ class HunterSEEnv(gym.Env):
         self._min_laser         = None         # 보상 계산용 LiDAR 최소 거리
         self._prev_v            = 0.0          # 스무딩 보상용 이전 속도
         self._prev_w            = 0.0
+        self._prev_throttle_norm = 0.0         # 변화율 제한용 이전 정규화 액션
+        self._prev_steering_norm = 0.0
         self._step_count        = 0
+        self._step_timeout_count = 0
+        self._episode_count     = 0
+
+        # 제어 명령 로그
+        self._ctrl_log_file   = None
+        self._ctrl_log_writer = None
+        if cfg.get("control_log_enabled", False):
+            log_dir = cfg.get("control_log_dir", "logs/control")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(
+                log_dir,
+                time.strftime("control_%Y%m%d_%H%M%S.csv"),
+            )
+            self._ctrl_log_file = open(log_path, "w", buffering=1, encoding="utf-8")
+            self._ctrl_log_file.write(
+                "episode,step,timestamp,"
+                "throttle,steering,linear_vel,angular_vel,reset\n"
+            )
+            print(f"[HunterSEEnv] 제어 명령 로그: {log_path}")
 
         # ROS2 퍼블리셔 초기화 (선택적)
         self._ros_node       = None
@@ -153,11 +196,20 @@ class HunterSEEnv(gym.Env):
                 break
         self._goal_pos = (gx, gz)
 
-        self._step_count        = 0
-        self._prev_dist         = None
-        self._ignore_spawn      = True
-        self._last_collision_at = 0.0
+        self._episode_count      += 1
+        self._step_count          = 0
+        self._prev_dist           = None
+        self._ignore_spawn        = True
+        self._last_collision_at   = 0.0
+        self._prev_throttle_norm  = 0.0
+        self._prev_steering_norm  = 0.0
         self._telemetry_event.clear()
+
+        # Unity가 연결될 때까지 무한 대기 (Play 버튼을 누를 때까지 블로킹)
+        if not self._connected_event.is_set():
+            print("[HunterSEEnv] Unity 연결 대기 중... (Unity에서 Play 버튼을 눌러주세요)")
+            self._connected_event.wait()
+            print("[HunterSEEnv] Unity 연결됨, 학습을 시작합니다.")
 
         # Unity에 리셋 명령 전송
         self._send_control(0.0, 0.0, reset=True)
@@ -167,6 +219,10 @@ class HunterSEEnv(gym.Env):
 
         # 첫 텔레메트리 대기
         if not self._telemetry_event.wait(timeout=self.step_timeout):
+            print(
+                "[HunterSEEnv] reset timeout: Unity 텔레메트리를 받지 못했습니다. "
+                "Unity Play 상태와 Socket.IO 연결을 확인하세요."
+            )
             obs = np.zeros(self.lidar_dim + 2, dtype=np.float32)
             return obs, {}
 
@@ -181,17 +237,53 @@ class HunterSEEnv(gym.Env):
         return obs, {}
 
     def step(self, action):
-        linear_vel  = float(action[0]) * self.max_linear_vel
-        angular_vel = float(action[1]) * self.max_angular_vel
+        # ── Fix 1: 액션 변화율 제한 ──────────────────────────────────────────
+        # 한 스텝에 변화할 수 있는 정규화 액션의 폭을 제한한다.
+        # (데이터셋 기준: throttle std ~0.022/frame @30Hz, RL ~4Hz 환산 → 0.25/step)
+        throttle_norm = float(np.clip(
+            action[0],
+            self._prev_throttle_norm - MAX_THROTTLE_DELTA,
+            self._prev_throttle_norm + MAX_THROTTLE_DELTA,
+        ))
+        steering_norm = float(np.clip(
+            action[1],
+            self._prev_steering_norm - MAX_STEERING_DELTA,
+            self._prev_steering_norm + MAX_STEERING_DELTA,
+        ))
+        self._prev_throttle_norm = throttle_norm
+        self._prev_steering_norm = steering_norm
+
+        # ── Fix 3: 비선형 Throttle-Velocity 매핑 (전진/후진 대칭) ────────────
+        # 부호를 분리해 절댓값으로 보간한 뒤 부호를 복원한다.
+        # max_linear_vel(1.333 m/s)에 해당하는 실제 throttle: (1.333+0.010)/3.097 ≈ 0.434
+        sign = 1.0 if throttle_norm >= 0.0 else -1.0
+        throttle_real = abs(throttle_norm) * (self.max_linear_vel + 0.010) / 3.097
+        linear_vel = sign * float(np.clip(
+            np.interp(throttle_real, _THROTTLE_PTS, _VELOCITY_PTS),
+            0.0, self.max_linear_vel,
+        ))
+
+        angular_vel = steering_norm * self.max_angular_vel
+
+        # ── Fix 2: 속도 비례 각속도 상한 (애커만 물리 제약: ω ≤ |v| / R_min) ─
+        w_cap = abs(linear_vel) / R_MIN
+        angular_vel = float(np.clip(angular_vel, -w_cap, w_cap))
 
         self._telemetry_event.clear()
         self._send_control(linear_vel, angular_vel)
 
         # 다음 텔레메트리 대기
         if not self._telemetry_event.wait(timeout=self.step_timeout):
+            self._step_timeout_count += 1
+            if self._step_timeout_count == 1 or self._step_timeout_count % 20 == 0:
+                print(
+                    f"[HunterSEEnv] step timeout x{self._step_timeout_count}: "
+                    "제어 명령에 대한 Unity 응답이 없습니다."
+                )
             obs = np.zeros(self.lidar_dim + 2, dtype=np.float32)
             return obs, 0.0, False, True, {"timeout": True}
 
+        self._step_timeout_count = 0
         self._step_count += 1
 
         collision      = self._detect_collision()
@@ -228,10 +320,110 @@ class HunterSEEnv(gym.Env):
         }
         return obs, reward, terminated, truncated, info
 
+    def smoke_test(self) -> bool:
+        """학습 전 씬 리셋과 로봇 제어 동작을 검증한다.
+
+        검증 항목:
+          1. 리셋 명령 → Unity 텔레메트리 수신 확인
+          2. 전진 명령 10 스텝 → 로봇 실제 이동 확인
+          3. 재리셋 → 로봇·목표 위치 변경 확인 (랜덤 배치)
+
+        Returns:
+            True  : 모든 검증 통과
+            False : 하나 이상 실패 (학습 중단 권장)
+        """
+        SEP = "=" * 55
+
+        print(f"\n{SEP}")
+        print("  씬 제어 검증 (SmokeTest)")
+        print(SEP)
+
+        # ── 1) 첫 번째 리셋 ─────────────────────────────────────
+        print("  [1/3] 씬 리셋 명령 전송...")
+        obs, _ = self.reset()
+
+        if obs.sum() == 0.0:
+            print("  [FAIL] 리셋 후 Unity 텔레메트리를 받지 못했습니다.")
+            print(f"{SEP}\n")
+            return False
+
+        pos1  = self._robot_pos
+        goal1 = self._goal_pos
+        tele_keys = list(self._telemetry.keys())
+        print(f"  [OK]   리셋 완료")
+        print(f"         텔레메트리 키: {tele_keys}")
+        print(f"         V1 Position raw: {self._telemetry.get('V1 Position', '(없음)')}")
+        print(f"         로봇 위치 : ({pos1[0]:.4f}, {pos1[1]:.4f})")
+        print(f"         목표 위치 : ({goal1[0]:.2f}, {goal1[1]:.2f})")
+
+        # ── 2) 제어 테스트 (전진 10 스텝) ────────────────────────
+        print("  [2/3] 전진 제어 명령 전송 (10 스텝)...")
+        for _ in range(10):
+            _, _, terminated, truncated, info = self.step(np.array([0.5, 0.0], dtype=np.float32))
+            if info.get("timeout"):
+                print("  [FAIL] 제어 명령에 대한 Unity 응답이 없습니다.")
+                print("         V1 CoSim, Socket.IO 연결, 씬 스크립트를 확인하세요.")
+                print(f"{SEP}\n")
+                return False
+            if terminated or truncated:
+                break
+
+        pos2  = self._robot_pos
+        moved = math.hypot(pos2[0] - pos1[0], pos2[1] - pos1[1])
+
+        if moved < 0.05:
+            print(f"  [FAIL] 제어 명령을 보냈지만 로봇이 움직이지 않았습니다.")
+            print(f"         이동 거리: {moved:.3f} m (기준: 0.05 m)")
+            print(f"         리셋 후 위치: ({pos1[0]:.4f}, {pos1[1]:.4f})")
+            print(f"         10스텝 후 위치: ({pos2[0]:.4f}, {pos2[1]:.4f})")
+            print(f"         V1 Position raw: {self._telemetry.get('V1 Position', '(없음)')}")
+            print("         점검 사항:")
+            print("           1) Unity 씬에서 VehicleController.DrivingMode = 1 확인")
+            print("           2) Socket.cs Inspector: TwistControllers 비어있는지 확인")
+            print("           3) UnityMainThreadDispatcher 오브젝트가 씬에 있는지 확인")
+            print("           4) Hunter SE - Random Obstacles 씬이 실행 중인지 확인")
+            print(f"{SEP}\n")
+            return False
+
+        print(f"  [OK]   로봇 이동 확인 — 이동 거리: {moved:.3f} m")
+
+        # ── 3) 두 번째 리셋 (랜덤 배치 확인) ─────────────────────
+        print("  [3/3] 재리셋 → 랜덤 위치 변경 확인...")
+        obs, _ = self.reset()
+        pos3  = self._robot_pos
+        goal2 = self._goal_pos
+
+        pos_changed  = math.hypot(pos3[0] - pos1[0], pos3[1] - pos1[1]) > 0.1
+        goal_changed = math.hypot(goal2[0] - goal1[0], goal2[1] - goal1[1]) > 0.1
+
+        print(f"  [{'OK' if pos_changed else 'WARN'}]   로봇 위치 변경: {pos_changed}  "
+              f"({pos1} → {pos3})")
+        print(f"  [{'OK' if goal_changed else 'WARN'}]   목표 위치 변경: {goal_changed}  "
+              f"({goal1} → {goal2})")
+
+        print("-" * 55)
+        print("  모든 검증 통과 — 학습을 시작합니다.")
+        print(f"{SEP}\n")
+        return True
+
     def close(self):
+        if self._ctrl_log_file is not None:
+            try:
+                self._ctrl_log_file.flush()
+                self._ctrl_log_file.close()
+            except Exception:
+                pass
+            self._ctrl_log_file = None
+
         if self._ros_enabled and self._ros_node is not None:
             try:
                 self._ros_node.destroy_node()
+                self._ros_node = None
+            except Exception:
+                pass
+            try:
+                import time as _time
+                _time.sleep(0.3)   # DDS 스레드 정리 대기
                 if rclpy.ok():
                     rclpy.shutdown()
             except Exception:
@@ -244,8 +436,8 @@ class HunterSEEnv(gym.Env):
             if not rclpy.ok():
                 rclpy.init()
             qos = QoSProfile(
-                reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_RELIABLE,
-                history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                history=QoSHistoryPolicy.KEEP_LAST,
                 depth=1,
             )
             self._ros_node = rclpy.create_node('hunter_se_rl_bridge')
@@ -329,11 +521,11 @@ class HunterSEEnv(gym.Env):
             imu.header.stamp    = now
             imu.header.frame_id = 'imu'
             imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w = q[0], q[1], q[2], q[3]
-            imu.orientation_covariance         = [0.0025,0,0,0,0.0025,0,0,0,0.0025]
+            imu.orientation_covariance         = [0.0025,0.0,0.0,0.0,0.0025,0.0,0.0,0.0,0.0025]
             imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = av[0], av[1], av[2]
-            imu.angular_velocity_covariance    = [0.0025,0,0,0,0.0025,0,0,0,0.0025]
+            imu.angular_velocity_covariance    = [0.0025,0.0,0.0,0.0,0.0025,0.0,0.0,0.0,0.0025]
             imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = la[0], la[1], la[2]
-            imu.linear_acceleration_covariance = [0.0025,0,0,0,0.0025,0,0,0,0.0025]
+            imu.linear_acceleration_covariance = [0.0025,0.0,0.0,0.0,0.0025,0.0,0.0,0.0,0.0025]
             self._ros_pubs['imu'].publish(imu)
 
             # 3) LiDAR
@@ -532,7 +724,7 @@ class HunterSEEnv(gym.Env):
             try:
                 parts = [float(v) for v in pos_str.split()]
                 if len(parts) >= 3:
-                    self._robot_pos = (parts[0], parts[2])
+                    self._robot_pos = (parts[0], parts[1])
             except (ValueError, TypeError):
                 pass
 
@@ -554,12 +746,38 @@ class HunterSEEnv(gym.Env):
     def _send_control(self, linear_vel: float, angular_vel: float, reset: bool = False):
         """제어 패킷을 Queue에 넣어 ws_handler(eventlet green thread)가 전송하게 한다."""
         control = dict(DEFAULT_CONTROL)
+        throttle = 0.0
+        steering = 0.0
+        if self.max_linear_vel > 1e-6:
+            throttle = float(np.clip(linear_vel / self.max_linear_vel, -1.0, 1.0))
+        if self.max_angular_vel > 1e-6:
+            steering = float(np.clip(angular_vel / self.max_angular_vel, -1.0, 1.0))
+
+        control["V1 CoSim"]            = "0"           # 속도 제어 모드 (CoSim=1은 위치 직접 제어)
         control["V1 Linear Velocity"]  = str(linear_vel)
         control["V1 Angular Velocity"] = str(angular_vel)
+        control["V1 Throttle"]         = str(throttle)
+        control["V1 Steering"]         = str(steering)
         control["V1 Reset"]            = "true" if reset else "false"
         control["Goal PosX"]           = str(self._goal_pos[0])
         control["Goal PosZ"]           = str(self._goal_pos[1])
         packet = EIO_MESSAGE + SIO_EVENT + json.dumps(["Bridge", control])
+
+        if self._ctrl_log_file is not None:
+            self._ctrl_log_file.write(
+                f"{self._episode_count},{self._step_count},"
+                f"{time.monotonic():.4f},"
+                f"{throttle:.4f},{steering:.4f},"
+                f"{linear_vel:.4f},{angular_vel:.4f},"
+                f"{'true' if reset else 'false'}\n"
+            )
+
+        # 최신 제어 명령만 의미가 있으므로 연결 대기 중 누적된 stale 패킷은 버린다.
+        while True:
+            try:
+                self._send_queue.get_nowait()
+            except queue.Empty:
+                break
         self._send_queue.put(packet)
 
     # ── WebSocket 서버 ──────────────────────────────────────────────────────
@@ -567,23 +785,40 @@ class HunterSEEnv(gym.Env):
     def _start_server(self):
         @websocket.WebSocketWSGI
         def ws_handler(ws):
-            self._ws = ws
-            try:
-                ws.send(OPEN_PACKET)
-                ws.send(EIO_MESSAGE + SIO_EVENT + json.dumps(["Bridge", DEFAULT_CONTROL]))
+            send_lock = threading.Lock()
 
-                while True:
-                    while not self._send_queue.empty():
+            def safe_send(packet: str):
+                with send_lock:
+                    ws.send(packet)
+
+            def send_loop():
+                while self._ws is ws:
+                    sent = False
+                    while True:
                         try:
-                            ws.send(self._send_queue.get_nowait())
+                            packet = self._send_queue.get_nowait()
                         except queue.Empty:
                             break
+                        safe_send(packet)
+                        sent = True
+                    if not sent:
+                        eventlet.sleep(0.01)
 
+            self._ws = ws
+            self._connected_event.set()
+            print("[HunterSEEnv] Unity Socket.IO 연결됨")
+            sender_gt = None
+            try:
+                safe_send(OPEN_PACKET)
+                safe_send(EIO_MESSAGE + SIO_EVENT + json.dumps(["Bridge", DEFAULT_CONTROL]))
+                sender_gt = eventlet.spawn(send_loop)
+
+                while True:
                     msg = ws.wait()
                     if msg is None:
                         break
                     if msg == EIO_PING:
-                        ws.send(EIO_PONG)
+                        safe_send(EIO_PONG)
                     elif msg.startswith(EIO_MESSAGE + SIO_EVENT):
                         try:
                             payload = json.loads(msg[2:])
@@ -602,7 +837,11 @@ class HunterSEEnv(gym.Env):
             except Exception:
                 pass
             finally:
+                if sender_gt is not None:
+                    sender_gt.kill()
                 self._ws = None
+                self._connected_event.clear()
+                print("[HunterSEEnv] Unity Socket.IO 연결 종료")
 
         def app(environ, start_response):
             if environ.get("PATH_INFO", "").startswith("/socket.io/"):

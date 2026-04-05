@@ -72,7 +72,8 @@ RUN /opt/venv/rl/bin/pip install --upgrade pip && \
         "python-socketio[client]" \
         eventlet \
         gevent \
-        gevent-websocket
+        gevent-websocket \
+        pyyaml
 
 # 컨테이너 접속 시 RL 가상환경 자동 활성화
 RUN echo "source /opt/venv/rl/bin/activate" >> /root/.bashrc

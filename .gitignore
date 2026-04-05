@@ -6,3 +6,7 @@ stable-baselines3/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+
+# RL 학습 출력 파일
+models/
+logs/

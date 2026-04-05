@@ -7,9 +7,11 @@ env:
   lidar_dim: 360
   lidar_max_range: 12.0
 
-  # Hunter SE 물리 한계
-  max_linear_vel: 1.5
-  max_angular_vel: 1.0
+  # Hunter SE 물리 한계 (공식 스펙 기준)
+  # 최대 속도: 4.8 km/h = 1.333 m/s
+  # 최대 각속도: v_max / R_min = 1.333 / 1.9 m = 0.702 rad/s
+  max_linear_vel: 1.333
+  max_angular_vel: 0.702
 
   # 아레나 (RandomObstacleArenaBuilder.cs의 arenaSize와 일치)
   arena_size: 30.0
@@ -17,7 +19,11 @@ env:
 
   # 에피소드 설정
   max_episode_steps: 500
-  step_timeout: 5.0
+  step_timeout: 2.0
 
   # 충돌 감지 (test_collision.py 방식)
   collision_debounce_sec: 1.0
+
+  # 제어 명령 로그
+  control_log_enabled: true
+  control_log_dir: "logs/control"

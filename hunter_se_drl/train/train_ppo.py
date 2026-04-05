@@ -9,15 +9,17 @@ SB3 PPO로 Hunter SE 장애물 회피 + 목표 도달 학습.
 import os
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 
 from envs.hunter_se_env import HunterSEEnv
 from models.custom_policy import PPO_POLICY_KWARGS
 from utils.file_manager import ensure_dir, load_yaml
+from utils.train_logger import DRLLogCallback, print_training_header
 
 CONFIG_DIR  = os.path.join(os.path.dirname(__file__), "..", "config")
 RVIZ_CONFIG = "/autodrive/AutoDRIVE-Devkit/ADSS Toolkit/autodrive_ros2/autodrive_hunter_se/rviz/simulator.rviz"
@@ -115,13 +117,38 @@ def _launch_rviz():
         f"source '{RVIZ_SETUP}' && "
         f"ros2 run rviz2 rviz2 -d '{RVIZ_CONFIG}'"
     )
+    log_path = "/tmp/hunter_se_rviz2_ppo.log"
     try:
-        proc = subprocess.Popen(
-            ["bash", "-c", cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        env = os.environ.copy()
+        # OpenCV 내장 Qt 플러그인이 시스템 Qt를 덮어쓰는 문제 방지
+        env["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/opt/ros/humble/lib/x86_64-linux-gnu/qt5/plugins"
+        with open(log_path, "ab") as log_fp:
+            proc = subprocess.Popen(
+                ["bash", "-c", cmd],
+                stdout=log_fp,
+                stderr=log_fp,
+                env=env,
+            )
+
+        time.sleep(1.0)
+        exit_code = proc.poll()
+        if exit_code is not None:
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as fp:
+                    lines = fp.readlines()[-20:]
+                tail = "".join(lines).strip()
+            except Exception:
+                tail = ""
+
+            print(f"[RViz2] 실행 직후 종료됨 (exit={exit_code})")
+            print(f"[RViz2] 로그: {log_path}")
+            if tail:
+                print("[RViz2] 최근 로그:")
+                print(tail)
+            return None
+
         print(f"[RViz2] 시작됨 (PID {proc.pid})")
+        print(f"[RViz2] 로그: {log_path}")
         return proc
     except Exception as e:
         print(f"[RViz2] 실행 실패 (학습은 계속됩니다): {e}")
@@ -157,7 +184,25 @@ def main():
     env = HunterSEEnv(config_path=os.path.join(CONFIG_DIR, "env_config.yaml"))
     rviz_proc = _launch_rviz()
 
-    # 3. 모델 생성
+    # 3. 씬 제어 검증 (리셋 + 주행 가능 여부 확인)
+    if not env.smoke_test():
+        env.close()
+        if rviz_proc is not None:
+            rviz_proc.terminate()
+        sys.exit(1)
+
+    # 4. 헤더 출력
+    env_obs = env.observation_space.shape[0]
+    env_act = env.action_space.shape[0]
+    print_training_header(
+        algo="PPO",
+        file_name="ppo_hunter_se",
+        save_dirs=[model_save_dir, log_dir],
+        state_dim=env_obs,
+        action_dim=env_act,
+    )
+
+    # 5. 모델 생성
     model = PPO(
         policy="MlpPolicy",
         env=env,
@@ -173,21 +218,22 @@ def main():
         max_grad_norm=max_grad_norm,
         policy_kwargs=PPO_POLICY_KWARGS,
         tensorboard_log=log_dir,
-        verbose=1,
+        verbose=0,
     )
 
-    # 4. 콜백
+    # 6. 콜백
     checkpoint_cb = CheckpointCallback(
         save_freq=save_freq,
         save_path=model_save_dir,
         name_prefix="ppo_hunter_se",
     )
+    log_cb = DRLLogCallback(algo="PPO", eval_freq=save_freq)
 
-    # 5. 학습
+    # 7. 학습
     try:
         model.learn(
             total_timesteps=total_timesteps,
-            callback=checkpoint_cb,
+            callback=CallbackList([checkpoint_cb, log_cb]),
             reset_num_timesteps=True,
         )
 
