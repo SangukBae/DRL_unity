@@ -17,7 +17,7 @@
 |------|--------|------|
 | `port` | 4567 | Unity Socket.IO 연결 포트 |
 | `lidar_dim` | 360 | LiDAR 빔 수 |
-| `lidar_max_range` | 12.0 | LiDAR 최대 거리 (m) |
+| `lidar_max_range` | 200.0 | LiDAR 최대 거리 (m) |
 | `max_linear_vel` | 1.5 | 최대 선속도 (m/s) |
 | `max_angular_vel` | 1.0 | 최대 각속도 (rad/s) |
 | `arena_size` | 30.0 | 아레나 크기 (m) |
