@@ -29,9 +29,8 @@ Hunter SE 로봇을 사용한 LiDAR 센서 기반 장애물 회피 + 목표 지�
          └──────────────────────────────────→ eventlet WebSocket 서버
                                               hunter_se_env.py (Gymnasium)
                                                     |
-                                              SB3 (SAC / PPO)
-                                                    |
-                                              ROS2 토픽 발행 ──→ RViz2
+                                     ┌──────────────┼──────────────┐
+                                  SB3 (SAC / PPO)  TQC (커스텀)   ROS2 퍼블리셔
 ```
 
 ## 통신 프로토콜
@@ -39,20 +38,27 @@ Hunter SE 로봇을 사용한 LiDAR 센서 기반 장애물 회피 + 목표 지�
 **Unity → Python (텔레메트리)**
 ```json
 {
-  "V1 LIDAR Range Array": "base64+gzip 인코딩 float 배열",
-  "V1 Position":          "x y z (공백 구분)",
-  "V1 Orientation Euler Angles": "pitch yaw roll (공백 구분, 도)",
-  "V1 Collisions":        "누적 충돌 카운터 (int)",
-  "V1 Speed":             "선속도 (float)",
-  "V1 Angular Velocity":  "x y z (공백 구분)"
+  "V1 LIDAR Pointcloud":          "Base64 인코딩 3D 포인트클라우드 (gzip 없음)",
+  "V1 Position":                  "Unity_Z  -Unity_X  Unity_Y(높이)  (GPS.cs 전송 순서, 공백 구분)",
+  "V1 Orientation Euler Angles":  "roll pitch yaw  (IMU.cs 전송 순서, 공백 구분, 라디안)",
+  "V1 Collisions":                "누적 충돌 카운터 (int)",
+  "V1 Speed":                     "절댓값 선속도 (m/s)",
+  "V1 Signed Speed":              "부호 포함 로컬 Z 속도 (전진 양수)",
+  "V1 Applied Throttle":          "데이터셋 다이나믹스 필터 후 실제 throttle",
+  "V1 Applied Steering":          "데이터셋 다이나믹스 필터 후 실제 steering",
+  "V1 Local Speed":               "차량 로컬 Z축 속도 (m/s)",
+  "Goal PosX":                    "목표 X 좌표 (Unity 좌표계)",
+  "Goal PosZ":                    "목표 Z 좌표 (Unity 좌표계)"
 }
 ```
 
 **Python → Unity (제어)**
 ```json
 {
-  "V1 Linear Velocity":  "float (m/s)",
-  "V1 Angular Velocity": "float (rad/s)",
+  "V1 Linear Velocity":  "float (m/s) — SAC/PPO 전용",
+  "V1 Angular Velocity": "float (rad/s) — SAC/PPO 전용",
+  "V1 Throttle":         "float [-1, 1] — TQC 직접 액추에이터 모드",
+  "V1 Steering":         "float [-1, 1] — TQC 직접 액추에이터 모드",
   "V1 Reset":            "true / false",
   "Goal PosX":           "float",
   "Goal PosZ":           "float"
@@ -92,28 +98,39 @@ Unity Hub → AutoDRIVE-Simulator 열기
 ### 4. RL 학습 시작 (Docker 내부)
 
 ```bash
-cd /autodrive
+cd /autodrive/hunter_se_drl
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
-# SAC 학습 (권장)
-python hunter_se_drl/train/train_sac.py
+# TQC 학습 (권장 — 분포적 critics, 최고 성능)
+python train/train_tqc.py
+python train/train_tqc.py --resume     # 체크포인트에서 재개
+
+# SAC 학습
+python train/train_sac.py
+python train/train_sac.py --resume
 
 # PPO 학습
-python hunter_se_drl/train/train_ppo.py
+python train/train_ppo.py
+python train/train_ppo.py --resume
 ```
-
-학습 시작 시 자동으로:
-- 준비 상태 점검 (패키지·config·포트 확인)
-- RViz2 백그라운드 실행
-- Unity 연결 대기 후 학습 시작
 
 ### 5. 학습 결과 확인
 
 ```bash
-# 테스트
-python hunter_se_drl/test/test_agent.py \
-    --model_path hunter_se_drl/models/saved/sac/final_model \
+# TQC 테스트
+python test/test_agent.py \
+    --model_path models/saved/tqc/seed_0/final/tqc_hunter_se_seed_0 \
+    --algorithm tqc \
+    --num_episodes 10
+
+# SAC / PPO 테스트
+python test/test_agent.py \
+    --model_path models/saved/sac/final_model \
     --algorithm sac \
     --num_episodes 10
+
+# TensorBoard
+tensorboard --logdir /autodrive/hunter_se_drl/logs
 ```
 
 ### Docker 재시작 순서
@@ -135,18 +152,21 @@ autodrive/
 ├── AutoDRIVE-Simulator/          # Unity 프로젝트
 │   └── Assets/Scripts/
 │       ├── Socket.cs             # Socket.IO 브리지
+│       ├── TwistController.cs    # V1 Linear/Angular Velocity 수신
+│       ├── VehicleController.cs  # V1 Throttle/Steering 수신
+│       ├── RandomObstacleArenaBuilder.cs  # 장애물 + 목표 자동 배치
 │       └── RLVisualizer.cs       # Unity 내 경로·목표 시각화
 ├── AutoDRIVE-Devkit/
 │   └── ADSS Toolkit/autodrive_ros2/
 │       └── autodrive_hunter_se/  # ROS2 시각화 패키지 (RViz2)
 ├── hunter_se_drl/                # RL 학습 패키지 (메인)
 │   ├── envs/                     # Gymnasium 환경
-│   ├── train/                    # 학습 스크립트
+│   ├── models/                   # TQC 에이전트 (tqc_agent.py)
+│   ├── train/                    # 학습 스크립트 (TQC / SAC / PPO / COX-Q)
 │   ├── test/                     # 테스트 스크립트
 │   ├── deploy/                   # 실제 로봇 실행
 │   ├── config/                   # 하이퍼파라미터
-│   ├── models/                   # 커스텀 정책
-│   └── utils/                    # LiDAR 유틸, 파일 관리
+│   └── utils/                    # LiDAR 유틸, 로거, 리플레이 버퍼
 ├── ros2_ws/                      # 실제 로봇용 ROS2 워크스페이스
 │   └── src/hunter_ros2/          # Hunter SE CAN 드라이버
 ├── Dockerfile
@@ -158,9 +178,9 @@ autodrive/
 | 패키지 | 용도 |
 |--------|------|
 | `stable-baselines3` | SAC / PPO 알고리즘 |
+| `torch` | TQC 커스텀 구현 + 신경망 백엔드 (CUDA 12.1) |
 | `gymnasium` | 강화학습 환경 인터페이스 |
 | `eventlet` | WebSocket 서버 (Unity 통신) |
-| `torch` | 신경망 백엔드 (CUDA 12.1) |
 | `numpy` | LiDAR 데이터 처리 |
 | `rclpy` + ROS2 Humble | RViz2 시각화 토픽 발행 |
 | `gevent` + `geventwebsocket` | autodrive_hunter_se 브리지 |
